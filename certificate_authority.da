@@ -1,0 +1,20 @@
+from crypto_utils import * 
+
+
+class CertificateAuthority(process):
+    def setup():
+        (privateKey,publicKey) = generatePublicPrivateKeyPair(True)
+        self.privateKey = privateKey
+        self.publicKey = publicKey
+
+       # def receive(msg=('find_key', key, node_id, org)):
+    def receive(msg=('request_certificate', nodeId, nodePublicKey), from_=requester):
+        output("I am finally here in CA updated ")
+        certificate = getNodeIdFromCA(nodeId,nodePublicKey)
+        output("certificate", certificate)
+        send(('issue_certificate',certificate), to=requester)
+
+    # await for a done message
+    def run():
+        --requesting
+        await(some(received(('done'), from_=parent())))

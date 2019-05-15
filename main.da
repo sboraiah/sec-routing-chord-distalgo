@@ -1,0 +1,203 @@
+import sys
+import time
+import math
+import hashlib
+from crypto_utils import * 
+
+CertificateAuthority = import_da("certificate_authority").CertificateAuthority
+Chord = import_da("chord").Chord
+SecureChord = import_da("secure_chord").SecureChord
+
+
+config(channel={'reliable', 'fifo'})
+
+
+#Driver program runs in this process/context. This driver is reponsible for
+#issuing requests like key-lookup, key-insert, node-insert, node-remove, node-recover.
+#This basically can run a test case.
+class Driver(process):
+    def setup(ps, m):
+        self.s = ps
+        self.max_procs = int(math.pow(2, m))
+
+    #Join a node to the ring. Expects n_id to be the hashed value, which acts as node id.
+    #Equilavent to bootstrap_node.join(n, n_id)
+    # bootstrap_node is the 1st node in the list. n_id is the integer id of the node. n is the object corresponding to that node
+
+    #Join a node to the ring. Computes n_id from ip_address of node.
+    #Equilavent to bootstrap_node.join(n)
+    def node_join(n, n_id, bootstrap_node):
+        if(n_id == -1):
+            h = hashlib.sha1((str(self)).encode('utf-8'))
+            n_id = int(h.hexdigest(), 16) % max_procs
+
+        send(('join_ring',bootstrap_node,n_id), to=n)
+
+    #Kill a node
+    def remove(n):
+        send(('kill_node'), to=n)
+
+    #Receover a node
+    def recover(n):
+        send(('recover_node'), to=n)
+
+    #Insert a key-value pair in the ring. It hashes the key to find the id.
+    #Equivalent to bootstrap_node.insert_key(key, value)
+    def insert_key(key, value, id, bootstrap_node):
+        if id == -1:
+            h = hashlib.sha1((str(key)).encode('utf-8'))
+            id = int(h.hexdigest(), 16) % max_procs
+
+        --insertkey
+        send(('insert_key', key, value, id, self), to=bootstrap_node)
+
+        --waitforreturnvalue
+        await(some(received(('return_value',a1))))
+
+        --returnvalue
+        returnValues = list(setof(a1,(('return_value',a1),_) in received))
+        returnValue = False
+
+        if len(returnValues):
+            returnValue = returnValues[len(returnValues) - 1]
+
+        return returnValue
+
+
+    #Lookup a key-value pair in the ring. It hashes the key to find the id.
+    #Equivalent to val = bootstrap_node.lookup(key)
+    def lookup(key, id, bootstrap_node):
+        if id == -1:
+            h = hashlib.sha1((str(key)).encode('utf-8'))
+            id = int(h.hexdigest(), 16) % max_procs
+
+        --querykey
+        send(('find_key',key, id, self,0), to=bootstrap_node)
+
+        --waitforvalue
+        # await
+        await(some(received(('value',_key,a1,hop_count))))
+
+        returnValues = list(setof((a1,hop_count),(('value',_key, a1, hop_count),_) in received))
+        returnValue = False
+
+        if len(returnValues):
+            returnValue = returnValues[0]
+
+        return returnValue
+ 
+    def run():
+
+        procid = 0
+        unstarted_proc = 0
+            
+        for p in ps:
+            if procid == 6:
+              procid = procid + 1
+              unstarted_proc = p
+              continue
+
+            #WARNING: id should not collide with existing id. Undefined behavior if that happens.
+
+            --joinnode
+            node_join(p, procid, list(ps)[0])
+
+            #Wait for each node to stabilize
+            time.sleep(1)
+            procid = procid + 1
+        ##################################################
+        #Kill node 4
+
+        --killnode
+        # remove(list(ps)[4])
+
+        time.sleep(5)
+
+        ##################################################
+        #Now recover the failed node
+
+        --recovernode
+        
+        ##################################################
+        #Wait for stabilize
+        print("Driver is waiting to stabilize\n")
+        time.sleep(5)
+       
+        ret = insert_key("Hello", "World", 6, list(ps)[0])
+        print("Return value is %s\n" % (str(ret)))
+
+        ret = insert_key("SBU", "SUNY", -1, list(ps)[0])
+        print("Return value is %s\n" % (str(ret)))
+
+        print("Driver is querying key\n")
+
+        start_time = time.process_time() 
+        val = lookup("Hello", 6, list(ps)[0])
+        print("Value is %s\n" % (str(val)))
+        print("=================================================================")
+        print("Time taken for lookup key Hello ", time.process_time() - start_time)
+        print("=================================================================")
+
+        start_time = time.process_time() 
+        val = lookup("SBU", -1, list(ps)[0])
+        print("Value is %s\n" % (str(val)))
+        print("=================================================================")
+        print("Time taken for lookup key SBU ", time.process_time() - start_time)
+        print("=================================================================")
+
+        # output("Sending kill to all")
+        for p in ps:
+            send(('kill_node'),to=p)
+
+       
+
+def main():
+    if len(sys.argv) != 3:
+        print("Error. Enter value of m signifying num of entries in finger table and 'chord/securechord' as the second parameter")
+        exit(0)
+    is_chord = False
+    m = int(sys.argv[1])
+    time_taken = time.clock()
+
+    time_taken = 0
+    ps = None
+    if (sys.argv[2] == 'chord'):
+        is_chord = True
+        # create normal chord nodes
+        ps = new(Chord, num = int(math.pow(2, m)))
+    else:
+        # create secure chord nodes
+        ps = new(SecureChord, num = int(math.pow(2, m)))
+        # start certificate authority
+        certificateAuthority = new(CertificateAuthority,num=1)
+        setup(certificateAuthority, ())
+        start(certificateAuthority)
+ 
+    print("procs = ps" + str(ps))
+    
+    #Create a process for driver
+    driver = new(Driver,num=1)
+    setup(driver, (ps, m,))
+ 
+    #Setup chord nodes
+    if is_chord:    
+        for p in ps:
+            setup(p, (ps -{p},driver, m,))
+    else:
+        ps_list = list(ps) 
+        # creating 75% regular nodes
+        for p in ps_list[:math.ceil(len(ps)*0.75)]:
+            setup(p, (ps - {p},driver, m, certificateAuthority, False))
+        # creating 25% malicious nodes
+        for p in ps_list[math.ceil(len(ps)*0.75):]:
+            setup(p, (ps - {p},driver, m, certificateAuthority, True))
+
+
+    start(ps)
+
+    #Start the driver process at the end
+    start(driver)
+    # wait for done messages from all the chord nodes
+    await(each(p in ps, has=received(('done'), from_=p)))
+    print(setof((a,b),(a,b) in received))
+    output("Terminating")
